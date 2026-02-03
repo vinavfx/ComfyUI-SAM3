@@ -695,11 +695,13 @@ class SAM3VideoOutput:
         from PIL import Image
         import os
 
-        # Create cache key
-        cache_key = (id(masks), video_state.session_uuid, id(scores), obj_id, plot_all_masks)
+        # Create cache key - only use cache when obj_id < 0 (selecting all)
+        # When obj_id >= 0, we must always process to get the correct specific mask
+        use_cache = obj_id < 0
+        cache_key = (id(masks), video_state.session_uuid, id(scores), plot_all_masks) if use_cache else None
 
-        # Check if we have cached result
-        if cache_key in SAM3VideoOutput._cache:
+        # Check if we have cached result (only for -1/all mode)
+        if use_cache and cache_key in SAM3VideoOutput._cache:
             print(f"[SAM3 Video Output] CACHE HIT - returning cached result for session={video_state.session_uuid[:8]}")
             return SAM3VideoOutput._cache[cache_key]
 
@@ -889,9 +891,11 @@ class SAM3VideoOutput:
         print(f"[SAM3 Video] Objects tracked: {num_objects}, plot_all_masks: {plot_all_masks}")
         print_vram("After extract")
 
-        # Cache the result (tensors backed by mmap files - minimal RAM)
+        # Cache the result only when obj_id < 0 (selecting all)
+        # Tensors are backed by mmap files - minimal RAM
         result = (all_masks, all_frames, all_vis)
-        SAM3VideoOutput._cache[cache_key] = result
+        if use_cache:
+            SAM3VideoOutput._cache[cache_key] = result
 
         return result
 
