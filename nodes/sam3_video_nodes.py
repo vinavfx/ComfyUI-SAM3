@@ -586,8 +586,8 @@ class SAM3VideoOutput:
         # ComfyUI caches based on input values - masks/video_state don't change
         return (id(masks), video_state.session_uuid, id(scores), obj_id, plot_all_masks)
 
-    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("masks", "frames", "visualization")
+    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("masks", "frames", "visualization", "mask_colors")
     FUNCTION = "extract"
     CATEGORY = "SAM3/video"
 
@@ -726,6 +726,7 @@ class SAM3VideoOutput:
         mask_path = os.path.join(mmap_dir, "masks.mmap")
         frame_path = os.path.join(mmap_dir, "frames.mmap")
         vis_path = os.path.join(mmap_dir, "vis.mmap")
+        colors_path = os.path.join(mmap_dir, "colors.mmap")
 
         # Create memory-mapped arrays (written to disk, not RAM)
         mask_mmap = np.memmap(mask_path, dtype='float32', mode='w+',
@@ -734,6 +735,8 @@ class SAM3VideoOutput:
                                shape=(num_frames, h, w, 3))
         vis_mmap = np.memmap(vis_path, dtype='float32', mode='w+',
                              shape=(num_frames, h, w, 3))
+        colors_mmap = np.memmap(colors_path, dtype='float32', mode='w+',
+                                shape=(num_frames, h, w, 3))
 
         print(f"[SAM3 Video] Streaming {num_frames} frames to disk: {mmap_dir}")
 
@@ -783,6 +786,7 @@ class SAM3VideoOutput:
 
                 # Create visualization with colored overlays
                 vis_frame = img_tensor.clone()
+                colors_frame = torch.zeros(h, w, 3, dtype=torch.float32)
 
                 # Check for empty mask (no detections)
                 if frame_mask.numel() == 0 or (frame_mask.dim() == 3 and frame_mask.shape[0] == 0):
@@ -802,6 +806,7 @@ class SAM3VideoOutput:
                             color = torch.tensor(colors[oid % len(colors)])
                             mask_rgb = obj_mask.unsqueeze(-1) * color.view(1, 1, 3)
                             vis_frame = vis_frame * (1 - 0.5 * obj_mask.unsqueeze(-1)) + 0.5 * mask_rgb
+                            colors_frame = colors_frame * (1 - obj_mask.unsqueeze(-1)) + mask_rgb
                             combined_mask = torch.max(combined_mask, obj_mask)
                     else:
                         # Show only selected obj_id
@@ -812,6 +817,7 @@ class SAM3VideoOutput:
                         color = torch.tensor(colors[vis_oid % len(colors)])
                         mask_rgb = obj_mask.unsqueeze(-1) * color.view(1, 1, 3)
                         vis_frame = vis_frame * (1 - 0.5 * obj_mask.unsqueeze(-1)) + 0.5 * mask_rgb
+                        colors_frame = colors_frame * (1 - obj_mask.unsqueeze(-1)) + mask_rgb
                         # Still compute combined for mask output
                         for oid in range(frame_mask.shape[0]):
                             om = frame_mask[oid].float()
@@ -838,6 +844,7 @@ class SAM3VideoOutput:
                     color = torch.tensor(colors[0])
                     mask_rgb = frame_mask.unsqueeze(-1) * color.view(1, 1, 3)
                     vis_frame = vis_frame * (1 - 0.5 * frame_mask.unsqueeze(-1)) + 0.5 * mask_rgb
+                    colors_frame = colors_frame * (1 - frame_mask.unsqueeze(-1)) + mask_rgb
 
                 # Final check for empty masks
                 if frame_mask.numel() == 0:
@@ -861,17 +868,20 @@ class SAM3VideoOutput:
 
                 # Write directly to mmap instead of appending to list
                 vis_mmap[frame_idx] = np.clip(vis_frame.numpy(), 0, 1)
+                colors_mmap[frame_idx] = np.clip(colors_frame.numpy(), 0, 1)
                 mask_mmap[frame_idx] = frame_mask.cpu().numpy()
             else:
                 # No mask for this frame - use zeros
                 mask_mmap[frame_idx] = np.zeros((h, w), dtype=np.float32)
                 vis_mmap[frame_idx] = img_np
+                colors_mmap[frame_idx] = np.zeros((h, w, 3), dtype=np.float32)
 
             # Flush to disk periodically and free memory
             if frame_idx % 50 == 0 and frame_idx > 0:
                 mask_mmap.flush()
                 frame_mmap.flush()
                 vis_mmap.flush()
+                colors_mmap.flush()
                 gc.collect()
                 print(f"[SAM3 Video] Processed {frame_idx}/{num_frames} frames")
 
@@ -879,6 +889,7 @@ class SAM3VideoOutput:
         mask_mmap.flush()
         frame_mmap.flush()
         vis_mmap.flush()
+        colors_mmap.flush()
 
         # ============================================================
         # Convert mmap to torch tensors (backed by disk, minimal RAM!)
@@ -886,6 +897,7 @@ class SAM3VideoOutput:
         all_masks = torch.from_numpy(mask_mmap)
         all_frames = torch.from_numpy(frame_mmap)
         all_vis = torch.from_numpy(vis_mmap)
+        all_colors = torch.from_numpy(colors_mmap)
 
         print(f"[SAM3 Video] Output: {all_masks.shape[0]} masks, shape {all_masks.shape}")
         print(f"[SAM3 Video] Objects tracked: {num_objects}, plot_all_masks: {plot_all_masks}")
@@ -893,7 +905,7 @@ class SAM3VideoOutput:
 
         # Cache the result only when obj_id < 0 (selecting all)
         # Tensors are backed by mmap files - minimal RAM
-        result = (all_masks, all_frames, all_vis)
+        result = (all_masks, all_frames, all_vis, all_colors)
         if use_cache:
             SAM3VideoOutput._cache[cache_key] = result
 
